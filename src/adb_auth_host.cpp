@@ -72,6 +72,35 @@ static std::string get_user_info() {
     return " " + username + "@" + hostname;
 }
 
+/********************************
+ *    PORTED FROM BORINGSSL     *
+ ********************************/
+int EVP_EncodedLength_Boringssl(size_t *out_len, size_t len) {
+	if (len + 2 < len) {
+		return 0;
+	}
+	len += 2;
+	len /= 3;
+
+	if (((len << 2) >> 2) != len) {
+		return 0;
+	}
+	len <<= 2;
+
+	if (len + 1 < len) {
+		return 0;
+	}
+	len++;
+
+	*out_len = len;
+	return 1;
+}
+/********************************
+ *  END PORTED FROM BORINGSSL   *
+ ********************************/
+
+
+
 static bool write_public_keyfile(RSA* private_key, const std::string& private_key_path) {
     LOG(INFO) << "write_public_keyfile...";
 
@@ -82,7 +111,7 @@ static bool write_public_keyfile(RSA* private_key, const std::string& private_ke
     }
 
     size_t expected_length;
-    if (!EVP_EncodedLength(&expected_length, sizeof(binary_key_data))) {
+    if (!EVP_EncodedLength_Boringssl(&expected_length, sizeof(binary_key_data))) {
         LOG(ERROR) << "Public key too large to base64 encode";
         return false;
     }

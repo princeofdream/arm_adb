@@ -27,6 +27,7 @@
 #error RSA modulus size must be multiple of the word size!
 #endif
 
+int BN_bn2bin_padded_boringssl(unsigned char *out, int len, const BIGNUM *in);
 // Size of the RSA modulus in words.
 #define ANDROID_PUBKEY_MODULUS_SIZE_WORDS (ANDROID_PUBKEY_MODULUS_SIZE / 4)
 
@@ -111,7 +112,7 @@ cleanup:
 }
 
 static bool android_pubkey_encode_bignum(const BIGNUM* num, uint8_t* buffer) {
-  if (!BN_bn2bin_padded(buffer, ANDROID_PUBKEY_MODULUS_SIZE, num)) {
+  if (!BN_bn2bin_padded_boringssl(buffer, ANDROID_PUBKEY_MODULUS_SIZE, num)) {
     return false;
   }
 
@@ -167,3 +168,77 @@ cleanup:
   BN_CTX_free(ctx);
   return ret;
 }
+
+/********************************
+ *    PORTED FROM BORINGSSL	*
+ ********************************/
+/* constant_time_select_ulong_boringssl returns |x| if |v| is 1 and |y| if |v| is 0. Its
+ * behavior is undefined if |v| takes any other value. */
+static BN_ULONG constant_time_select_ulong_boringssl(int v, BN_ULONG x, BN_ULONG y) {
+    BN_ULONG mask = v;
+    mask--;
+
+    return (~mask & x) | (mask & y);
+}
+
+/* constant_time_le_size_t_boringssl returns 1 if |x| <= |y| and 0 otherwise. |x| and |y|
+ * must not have their MSBs set. */
+static int constant_time_le_size_t_boringssl(size_t x, size_t y) {
+    return ((x - y - 1) >> (sizeof(size_t) * 8 - 1)) & 1;
+}
+
+/* read_word_padded_boringssl returns the |i|'th word of |in|, if it is not out of
+ * bounds. Otherwise, it returns 0. It does so without branches on the size of
+ * |in|, however it necessarily does not have the same memory access pattern. If
+ * the access would be out of bounds, it reads the last word of |in|. |in| must
+ * not be zero. */
+static BN_ULONG read_word_padded_boringssl(const BIGNUM *in, size_t i) {
+    /* Read |in->d[i]| if valid. Otherwise, read the last word. */
+    BN_ULONG l = in->d[constant_time_select_ulong_boringssl(
+    	constant_time_le_size_t_boringssl(in->dmax, i), in->dmax - 1, i)];
+
+    /* Clamp to zero if above |d->top|. */
+    return constant_time_select_ulong_boringssl(constant_time_le_size_t_boringssl(in->top, i), 0, l);
+}
+
+int BN_bn2bin_padded_boringssl(unsigned char *out, int len, const BIGNUM *in) {
+    /* Special case for |in| = 0. Just branch as the probability is negligible. */
+    if (BN_is_zero(in)) {
+        memset(out, 0, len);
+        return 1;
+    }
+
+    /* Check if the integer is too big. This case can exit early in non-constant
+     * time. */
+    if ((int)in->top > (len + (BN_BYTES - 1)) / BN_BYTES) {
+	return 0;
+    }
+    if ((len % BN_BYTES) != 0) {
+        BN_ULONG l = read_word_padded_boringssl(in, len / BN_BYTES);
+        if (l >> (8 * (len % BN_BYTES)) != 0) {
+            return 0;
+        }
+    }
+
+    /* Write the bytes out one by one. Serialization is done without branching on
+     * the bits of |in| or on |in->top|, but if the routine would otherwise read
+     * out of bounds, the memory access pattern can't be fixed. However, for an
+     * RSA key of size a multiple of the word size, the probability of BN_BYTES
+     * leading zero octets is low.
+     *
+     * See Falko Stenzke, "Manger's Attack revisited", ICICS 2010. */
+    int i = len;
+    while (i--) {
+        BN_ULONG l = read_word_padded_boringssl(in, i / BN_BYTES);
+        *(out++) = (unsigned int)(l >> (8 * (i % BN_BYTES))) & 0xff;
+    }
+    return 1;
+}
+/********************************
+ *   END PORTED FROM BORINGSSL	*
+ ********************************/
+
+
+
+
+
